@@ -1,3 +1,4 @@
+"""密钥工具函数 - 用于匹配数据库文件与对应密钥"""
 import os
 import posixpath
 

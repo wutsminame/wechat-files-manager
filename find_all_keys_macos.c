@@ -80,13 +80,30 @@ static int is_hex_char(unsigned char c) {
 }
 
 static pid_t find_wechat_pid(void) {
-    FILE *fp = popen("pgrep -x WeChat", "r");
-    if (!fp) return -1;
     char buf[64];
     pid_t pid = -1;
-    if (fgets(buf, sizeof(buf), fp))
-        pid = atoi(buf);
-    pclose(fp);
+
+    /* 方法1: 直接 pgrep（非 sudo 或 SIP 关闭时有效） */
+    FILE *fp = popen("pgrep -x WeChat", "r");
+    if (fp) {
+        if (fgets(buf, sizeof(buf), fp))
+            pid = atoi(buf);
+        pclose(fp);
+    }
+    if (pid > 0) return pid;
+
+    /* 方法2: sudo 下 pgrep 可能看不到进程，用 ps 列出所有进程后按路径匹配
+       macOS -comm= 输出完整路径如 /Users/.../WeChat.app/Contents/MacOS/WeChat，
+       匹配 /MacOS/WeChat$ 来精确命中主进程（排除 Helper/GPU/Renderer 等） */
+    const char *cmd = "ps -o pid=,comm= -ax | "
+        "awk '/\\/MacOS\\/WeChat$/ && !/Helper/ && !/GPU/ && !/Renderer/ "
+        "{print $1; exit}'";
+    fp = popen(cmd, "r");
+    if (fp) {
+        if (fgets(buf, sizeof(buf), fp))
+            pid = atoi(buf);
+        pclose(fp);
+    }
     return pid;
 }
 
@@ -143,9 +160,7 @@ int main(int argc, char *argv[]) {
     if (!home) home = "/root";
     printf("User home: %s\n", home);
 
-    /* Collect DB salts by recursively walking db_storage directories.
-     * Note: POSIX glob() does not support ** recursive matching on macOS,
-     * so we use nftw() to walk the directory tree instead. */
+    /* Collect DB salts by recursively walking db_storage directories. */
     printf("\nScanning for DB files...\n");
     char db_base_dir[512];
     snprintf(db_base_dir, sizeof(db_base_dir),
@@ -187,7 +202,7 @@ int main(int argc, char *argv[]) {
         kr = mach_vm_region(task, &addr, &size, VM_REGION_BASIC_INFO_64,
                            (vm_region_info_t)&info, &info_count, &obj_name);
         if (kr != KERN_SUCCESS) break;
-        if (size == 0) { addr++; continue; }  /* guard against infinite loop */
+        if (size == 0) { addr++; continue; }
 
         if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) ==
             (VM_PROT_READ | VM_PROT_WRITE)) {
@@ -207,7 +222,6 @@ int main(int argc, char *argv[]) {
 
                     for (size_t i = 0; i + HEX_PATTERN_LEN + 3 < dc; i++) {
                         if (buf[i] == 'x' && buf[i + 1] == '\'') {
-                            /* Check if followed by 96 hex chars and closing ' */
                             int valid = 1;
                             for (int j = 0; j < HEX_PATTERN_LEN; j++) {
                                 if (!is_hex_char(buf[i + 2 + j])) { valid = 0; break; }
@@ -215,14 +229,12 @@ int main(int argc, char *argv[]) {
                             if (!valid) continue;
                             if (buf[i + 2 + HEX_PATTERN_LEN] != '\'') continue;
 
-                            /* Extract key and salt hex */
                             char key_hex[65], salt_hex[33];
                             memcpy(key_hex, buf + i + 2, 64);
                             key_hex[64] = '\0';
                             memcpy(salt_hex, buf + i + 2 + 64, 32);
                             salt_hex[32] = '\0';
 
-                            /* Convert to lowercase for comparison */
                             for (int j = 0; key_hex[j]; j++)
                                 if (key_hex[j] >= 'A' && key_hex[j] <= 'F')
                                     key_hex[j] += 32;
@@ -230,7 +242,6 @@ int main(int argc, char *argv[]) {
                                 if (salt_hex[j] >= 'A' && salt_hex[j] <= 'F')
                                     salt_hex[j] += 32;
 
-                            /* Deduplicate */
                             int dup = 0;
                             for (int k = 0; k < key_count; k++) {
                                 if (strcmp(keys[k].key_hex, key_hex) == 0 &&
@@ -251,8 +262,6 @@ int main(int argc, char *argv[]) {
                     }
                     mach_vm_deallocate(mach_task_self(), data, dc);
                 }
-                /* Advance with overlap to catch patterns spanning chunk boundaries.
-                 * Pattern is x'<96 hex chars>' = 99 bytes total. */
                 if (cs > HEX_PATTERN_LEN + 3)
                     ca += cs - (HEX_PATTERN_LEN + 3);
                 else
@@ -289,9 +298,7 @@ int main(int argc, char *argv[]) {
     }
     printf("\nMatched %d/%d keys to known DBs\n", matched, key_count);
 
-    /* Save JSON: { "rel/path.db": { "enc_key": "hex" }, ... }
-     * Uses forward slashes (native macOS paths, valid JSON without escaping).
-     */
+    /* Save JSON */
     const char *out_path = "all_keys.json";
     FILE *fp = fopen(out_path, "w");
     if (fp) {
