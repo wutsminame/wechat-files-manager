@@ -64,7 +64,6 @@ decrypt_standalone/
 ├── key_utils.py            # 密钥匹配工具
 ├── config.example.json     # 配置文件模板
 ├── requirements.txt        # Python 依赖
-├── .venv/                  # Python 虚拟环境（自带）
 ├── all_keys.json           # 当前密钥文件（提取后生成）
 └── all_keys_archive/       # 密钥归档目录（自动创建）
 ```
